@@ -14,6 +14,7 @@
 #include "ClientConnection.h"
 #include "Exception.h"
 #include "AuthDialog.h"
+#include "CredentialManager.h"
 
 #define SECURITY_WIN32
 #include <security.h>
@@ -614,25 +615,30 @@ struct ThumbHost
 
 	ThumbHost(TCHAR *k, TCHAR *f) : key(k), fname(f) { }
 
-	bool CompareThumbprint(char *hex)
+	bool CompareThumbprint(const TCHAR *hex)
 	{ 
 		TCHAR buf[64] = { 0 };
 		GetPrivateProfileString(ThumbprintSection, key, NULL, buf, _countof(buf), fname);
-		return _tcscmp((LPCTSTR)hex, buf) == 0;
+		return _tcscmp(hex, buf) == 0;
 	}
 	
-	void SaveThumbprint(char *hex) { WritePrivateProfileString(ThumbprintSection, key, (LPCTSTR)hex, fname); }
+	bool SaveThumbprint(const TCHAR *hex) { return WritePrivateProfileString(ThumbprintSection, key, hex, fname) != FALSE; }
 };
 
-static bool GetCertificateThumbprint(PCCERT_CONTEXT pCert, char *hex, int hexsize)
+static bool GetCertificateThumbprint(PCCERT_CONTEXT pCert, TCHAR *hex, size_t hexsize)
 {
 	BYTE thumb[64] = { 0 };
 	DWORD size = sizeof(thumb);
-	if (!pCert || !CertGetCertificateContextProperty(pCert, CERT_HASH_PROP_ID, thumb, &size))
+	if (!pCert || !hex ||
+		!CertGetCertificateContextProperty(pCert, CERT_HASH_PROP_ID, thumb, &size) ||
+		hexsize < size * 3)
 		return false;
-	snprintf(hex, hexsize, "%02x", thumb[0]);
+	_sntprintf_s(hex, hexsize, _TRUNCATE, _T("%02x"), thumb[0]);
 	for (DWORD i = 1; i < size; i++)
-		snprintf(hex + strlen(hex), hexsize - strlen(hex), "-%02x", thumb[i]);
+	{
+		size_t used = _tcslen(hex);
+		_sntprintf_s(hex + used, hexsize - used, _TRUNCATE, _T("-%02x"), thumb[i]);
+	}
 	return true;
 }
 
@@ -723,7 +729,7 @@ void ClientConnection::AuthVeNCrypt()
 			TCHAR key[MAX_HOST_NAME_LEN];
 			_stprintf_s(key, MAX_HOST_NAME_LEN, _T("%s:%d"), m_host, m_port);
 			ThumbHost host(key, m_opts->getDefaultOptionsFileName());
-			char hex[64];
+			TCHAR hex[64] = { 0 };
 			bool done = false;
 			if (GetCertificateThumbprint(session.pRemoteCert, hex, sizeof(hex)) && host.CompareThumbprint(hex))
 				done = true;
@@ -772,8 +778,8 @@ void ClientConnection::AuthVeNCrypt()
 					QuietException_helper(L"Authentication cancelled");
 					break;
 				default:
-					if (bPersist)
-						host.SaveThumbprint(hex);
+					if (bPersist && !host.SaveThumbprint(hex))
+						vnclog.Print(0, _T("Failed to save certificate thumbprint for %s:%d (error %lu)\n"), m_host, m_port, GetLastError());
 					done = true;
 					break;
 				}
@@ -800,12 +806,22 @@ void ClientConnection::AuthVeNCrypt()
 			char _tlsUser[256]={0}, _tlsPasswd[256]={0};
 			if (strlen(m_clearPasswd) == 0)
 			{
-				AuthDialog ad;
-				ad.SetStatusWindow(m_hwndStatus, m_opts->m_ClassName);
-				if (!ad.DoDialog(dtUserPass, m_host, m_port))
-					QuietException_helper(L"Authentication cancelled");
-				strcpy_s(_tlsUser, 256, ad.m_user);
-				strcpy_s(_tlsPasswd, 256, ad.m_passwd);
+				char savedDomain[256] = { 0 };
+				m_usedSavedVncPassword = CredentialManager::ReadMsLogonPassword(
+					m_host, m_port, savedDomain, _countof(savedDomain),
+					_tlsUser, _countof(_tlsUser), _tlsPasswd, _countof(_tlsPasswd));
+				if (!m_usedSavedVncPassword)
+				{
+					AuthDialog ad;
+					ad.SetStatusWindow(m_hwndStatus, m_opts->m_ClassName);
+					if (!ad.DoDialog(dtUserPass, m_host, m_port))
+						QuietException_helper(L"Authentication cancelled");
+					strcpy_s(_tlsUser, ad.m_user);
+					strcpy_s(_tlsPasswd, ad.m_passwd);
+					if (ad.m_savePassword && !CredentialManager::WriteMsLogonPassword(
+						m_host, m_port, "", _tlsUser, _tlsPasswd))
+						vnclog.Print(0, _T("Failed to save TLS credentials for %s:%d (error %lu)\n"), m_host, m_port, GetLastError());
+				}
 			} else {
 				strcpy_s(_tlsUser, 256, m_cmdlnUser);
 				strcpy_s(_tlsPasswd, 256, m_clearPasswd);
