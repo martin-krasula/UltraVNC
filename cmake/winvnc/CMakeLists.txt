@@ -17,6 +17,7 @@ find_package(ZLIB REQUIRED)
 find_package(zstd CONFIG REQUIRED)
 find_package(LibLZMA REQUIRED)
 find_package(unofficial-sodium CONFIG REQUIRED)
+find_package(minizip-ng CONFIG REQUIRED)
   
 set(${PROJECT_NAME}_SOURCES
     ../../DSMPlugin/DSMPlugin.cpp
@@ -119,8 +120,7 @@ target_link_libraries(${PROJECT_NAME}
     libomnithread
     librdr
     libudtcloud
-    libzip32
-    libzipunzip
+    PRIVATE MINIZIP::minizip-ng
     comctl32
     comdlg32
     dwmapi
